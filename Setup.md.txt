@@ -1,0 +1,381 @@
+# Claude Code Kickoff: Enterprise AI Agent — Saturday Morning Infrastructure
+
+You are helping me build an enterprise AI agent using OpenClaw on an Azure Linux VM. This is a proof-of-concept that needs to be demo-ready by Tuesday. We're going to work through this methodically — ask me to confirm before executing anything destructive or that costs money.
+
+## Context
+
+- **Company**: Accelerate Tech (<COMPANY_LEGAL_NAME>), Microsoft Solutions Partner — Data & AI
+- **Domain**: <COMPANY_DOMAIN_OLD> (already exists in our M365 tenant)
+- **Azure region**: Australia East
+- **My role**: I'm the primary user interacting with the agent.
+- **Goal**: Deploy OpenClaw on Azure VM, give it a corporate identity, connect it to Teams, email (read-only), calendar (read-only), SharePoint (shared doc space), and GitHub (its own account for deploying web apps via Bicep).
+
+## Phase 1: Azure Resource Group & VM
+
+Create the resource group and deploy the VM. Before running, show me the commands and estimated costs.
+
+```
+Resource group: rg-ai-agent-prod
+VM name: vm-openclaw-agent
+Size: Standard_B2ms (2 vCPU, 8 GB RAM)
+Image: Ubuntu 24.04 LTS
+Location: australiaeast
+Admin user: azureagent
+Auth: SSH key (generate new keypair)
+Public IP: Static, Standard SKU
+OS Disk: 64 GB Premium SSD
+Tags: project=ai-agent, environment=poc, owner=<USER_TAG>
+```
+
+After the VM is up:
+1. Lock down the NSG — inbound SSH (22) restricted to my current public IP only, HTTPS (443) outbound allowed, deny all other inbound
+2. Enable Azure Monitor basic diagnostics
+3. Show me the SSH connection string
+
+## Phase 2: VM Base Configuration
+
+SSH into the VM and configure it step by step. Run each block and confirm success before moving on.
+
+### 2.1 System updates & prerequisites
+```bash
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y curl git build-essential unzip jq
+```
+
+### 2.2 Install Node.js 22 LTS
+```bash
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt install -y nodejs
+node --version
+npm --version
+```
+
+### 2.3 Install headless Chromium (for browser skills)
+```bash
+sudo apt install -y chromium-browser
+```
+
+### 2.4 Install PM2 for process management
+```bash
+sudo npm install -g pm2
+```
+
+### 2.5 Create dedicated agent user
+```bash
+sudo useradd -m -s /bin/bash ai-agent
+# We'll switch to this user when installing OpenClaw
+```
+
+### 2.6 Install Caddy (reverse proxy with automatic HTTPS)
+```bash
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update
+sudo apt install caddy
+```
+
+We'll configure the Caddyfile later once we have the domain pointed at the VM's IP.
+
+## Phase 3: Entra ID — Agent User Account
+
+Back on my local machine, use Azure CLI / Microsoft Graph to create the agent's identity. Ask me for any values you need.
+
+### 3.1 Create the user
+```
+Display name: AI Agent
+UPN: <AGENT_EMAIL_OLD>
+Usage location: AU
+Password: auto-generate, show me so I can store it in Key Vault
+Account enabled: true
+```
+
+### 3.2 Assign M365 Business Basic license
+Find the available license SKU in my tenant and assign it. If I don't have a spare license, tell me and I'll buy one.
+
+### 3.3 MFA exclusion
+Help me create or update a Conditional Access policy that excludes the ai-agent service account from MFA requirements. Show me the policy config before applying.
+
+## Phase 4: Entra ID — App Registration
+
+### 4.1 Register the app
+```
+Name: OpenClaw Agent API
+Supported account types: Single tenant
+Redirect URI: None (daemon/service)
+```
+
+### 4.2 Create a client secret
+Generate a client secret with a 6-month expiry. Show me the value so I can store it securely. Remind me it won't be visible again.
+
+### 4.3 Configure API permissions
+Add these Microsoft Graph **application** permissions:
+- Mail.Read
+- Calendars.Read
+- Sites.Read.All
+- Sites.ReadWrite.All
+- ChannelMessage.Read.All
+- ChannelMessage.Send
+- User.Read.All
+- OnlineMeetings.Read.All
+- Files.Read.All
+
+Then grant admin consent for the tenant.
+
+### 4.4 Application access policy for mail
+Create an application access policy so the app can ONLY read my mailbox, not everyone's. Steps:
+1. Create a mail-enabled security group called "AI Agent Mail Access"
+2. Add my account (<USER_EMAIL>) as a member
+3. Create the ApplicationAccessPolicy restricting the app to that group
+4. Test with `Test-ApplicationAccessPolicy` to confirm it works
+
+Ask me to confirm my email address before running this.
+
+## Phase 5: SharePoint Shared Workspace
+
+### 5.1 Create a SharePoint site
+```
+Site name: AI Agent Workspace
+URL: <SHAREPOINT_DOMAIN>/sites/ai-agent
+Type: Team site (no Microsoft 365 group)
+Owner: <USER_EMAIL>
+Member: <AGENT_EMAIL_OLD>
+```
+
+### 5.2 Create document libraries
+Create these libraries in the site:
+- **Inbox** — I drop files here for the agent to process
+- **Outbox** — Agent places completed work here
+- **Reference** — Persistent docs the agent should know (templates, guidelines, patterns)
+- **Projects** — Working documents organised by client/project
+
+### 5.3 Get the site ID
+We'll need the SharePoint site ID for OpenClaw's Graph API config. Retrieve it and save it.
+
+## Phase 6: Azure Bot Registration
+
+### 6.1 Create the Azure Bot resource
+```
+Name: bot-openclaw-agent
+Resource group: rg-ai-agent-prod
+Location: Global
+Pricing: F0 (free)
+Microsoft App ID: use the app registration from Phase 4
+```
+
+### 6.2 Enable Teams channel
+Add Microsoft Teams as a channel on the bot.
+
+### 6.3 Note the messaging endpoint
+We'll set this to `https://<agent-domain>/api/messages` once we have the domain configured. For now, note what URL format we need.
+
+## Phase 7: DNS & SSL
+
+I need to point a subdomain at the VM. Help me figure out what DNS record to create:
+- I want to use something like `agent.<COMPANY_DOMAIN_OLD>`
+- It should point to the VM's static public IP
+- Once DNS propagates, Caddy will handle SSL automatically via Let's Encrypt
+
+Show me the DNS record I need to create (I'll do this in my DNS provider manually), then help me configure the Caddyfile:
+
+```
+agent.<COMPANY_DOMAIN_OLD> {
+    reverse_proxy localhost:3000
+}
+```
+
+(Port 3000 or whatever OpenClaw's gateway listens on — check the docs)
+
+## Phase 8: OpenClaw Installation
+
+### 8.1 Install OpenClaw
+SSH into the VM, switch to the ai-agent user, and install:
+```bash
+sudo su - ai-agent
+curl -fsSL https://openclaw.ai/install.sh | bash
+openclaw onboard --install-daemon
+```
+
+During onboarding, configure:
+- AI Provider: Anthropic (I'll provide my API key when prompted)
+- Primary model: claude-sonnet-4-6
+- Fallback: claude-haiku-4-5
+- Channel: Microsoft Teams
+
+### 8.2 Lock down ClawHub
+Edit the OpenClaw config to disable all external skill sources:
+```json
+{
+  "clawhub": {
+    "enabled": false,
+    "autoInstall": false,
+    "search": false
+  },
+  "skills": {
+    "source": "workspace",
+    "allowRemote": false
+  }
+}
+```
+
+### 8.3 Write soul.md
+Create the soul.md file in the workspace root with:
+
+```markdown
+## Identity
+You are the Accelerate Tech AI Agent. You work for Accelerate Tech, a Microsoft Solutions Partner specialising in Data & AI for Australian government. You report to the user.
+
+## Behaviour Rules
+- NEVER install skills from ClawHub or any external source
+- ONLY build new skills when explicitly instructed by the user
+- Always confirm before executing any destructive or irreversible actions
+- Email and calendar access is READ-ONLY — never send emails, reply, forward, accept or decline meetings without explicit approval from the user
+- Keep all client data strictly confidential between project channels — never cross-reference or mention one client's information in another client's channel
+- Log all significant actions to the #agent-log Teams channel
+- When asked to build or deploy something, always create a PR for review — never push directly to main
+- If you're unsure about something, ask rather than assume
+- Be concise and direct in Teams messages — no fluff
+
+## Capabilities
+- Read and summarise emails from the user's inbox (read-only)
+- Read and report on calendar events (read-only)
+- Access and process documents from the SharePoint AI Agent Workspace
+- Participate in Teams channels per project, maintaining separate context
+- Build and deploy web apps via GitHub + Bicep (always via PR, never direct)
+- Research topics using web search
+- Draft documents, reports, SOWs, and communications for review
+- Summarise meeting transcripts and generate action items
+- Monitor the SharePoint Inbox for new files to process
+
+## Tech Stack Preferences
+When building web applications, use:
+- Next.js with TypeScript
+- Tailwind CSS for styling
+- shadcn/ui for components
+- Azure Bicep for infrastructure
+- GitHub Actions for CI/CD
+- Deploy to Azure App Service (Linux)
+
+## What You Don't Do
+- Never access anyone's email or calendar except the user's (and only read-only)
+- Never make purchases, sign up for services, or commit to anything on behalf of Accelerate Tech
+- Never share confidential client information outside the appropriate project channel
+- Never bypass the PR review process for deployments
+```
+
+### 8.4 Configure Teams channel connection
+Connect OpenClaw to the Azure Bot we registered. This will need the Bot ID and client secret. Walk me through the OpenClaw Teams channel config.
+
+### 8.5 Configure Graph API credentials
+Set up the OpenClaw environment with the Entra ID app registration credentials so it can access email, calendar, and SharePoint:
+```
+AZURE_TENANT_ID=<from Phase 4>
+AZURE_CLIENT_ID=<from Phase 4>
+AZURE_CLIENT_SECRET=<from Phase 4>
+SHAREPOINT_SITE_ID=<from Phase 5>
+```
+
+### 8.6 Start with PM2
+```bash
+pm2 start openclaw --name ai-agent -- start
+pm2 startup systemd
+pm2 save
+```
+
+## Phase 9: Teams Project Channels
+
+### 9.1 Create the private Team
+```
+Team name: Accelerate AI Agent
+Type: Private
+Owner: <USER_EMAIL>
+Member: <AGENT_EMAIL_OLD>
+```
+
+### 9.2 Create channels
+- General (default)
+- #client-a
+- #client-b
+- #client-c
+- #internal-ops
+- #research
+- #deployments
+- #agent-log
+
+### 9.3 Test the agent
+Send a message in the General channel @mentioning the agent. Confirm it responds.
+
+## Phase 10: GitHub Account & Repos
+
+I'll create the GitHub account manually (<AGENT_EMAIL_OLD>). Once done, help me:
+
+### 10.1 Generate SSH key on the VM
+```bash
+sudo su - ai-agent
+ssh-keygen -t ed25519 -C "<AGENT_EMAIL_OLD>"
+cat ~/.ssh/id_ed25519.pub
+# I'll add this to the GitHub account
+```
+
+### 10.2 Configure git identity
+```bash
+git config --global user.name "Accelerate Tech Agent"
+git config --global user.email "<AGENT_EMAIL_OLD>"
+```
+
+### 10.3 Create template repos
+Help me scaffold these repos:
+
+**<GITHUB_ORG>/webapp-template**
+- Next.js 14 + TypeScript + Tailwind + shadcn/ui starter
+- Standard project structure with src/app, src/components, src/lib
+- Basic layout with Accelerate Tech branding
+- .github/workflows/deploy.yml (Azure App Service via Bicep)
+- infra/main.bicep referencing shared modules
+- README with usage instructions
+
+**<GITHUB_ORG>/bicep-modules**
+- Shared Bicep modules:
+  - app-service.bicep (Linux App Service with Node.js)
+  - storage.bicep (Storage Account)
+  - sql.bicep (Azure SQL Database, basic tier)
+  - keyvault.bicep (Key Vault with default access policies)
+- Each module parameterised with sensible defaults for Australia East
+- README documenting each module's parameters
+
+### 10.4 Azure service principal for GitHub Actions
+Create a separate service principal (not the agent's app reg) for deployments:
+1. Create SP with Contributor role on a deployment resource group
+2. Configure OIDC federated credentials for GitHub Actions
+3. Show me the GitHub Actions secrets to configure
+
+## Verification Checklist
+
+At the end of all phases, run through this checklist with me:
+
+- [ ] VM is running and accessible via SSH
+- [ ] Agent user account exists in Entra ID with M365 license
+- [ ] App registration has correct Graph permissions with admin consent
+- [ ] Application access policy restricts mail to my mailbox only
+- [ ] SharePoint site exists with Inbox/Outbox/Reference/Projects libraries
+- [ ] Azure Bot registered with Teams channel enabled
+- [ ] DNS record created and SSL working via Caddy
+- [ ] OpenClaw installed, configured, and running via PM2
+- [ ] ClawHub disabled, workspace-only skills mode
+- [ ] soul.md in place with correct rules
+- [ ] Agent responds to @mention in Teams General channel
+- [ ] Agent can read my recent emails via Graph API
+- [ ] Agent can read my calendar events via Graph API
+- [ ] Agent can list files in the SharePoint Inbox
+- [ ] SSH key generated and added to GitHub account
+- [ ] Template repos created and pushed
+- [ ] GitHub Actions OIDC federation configured
+- [ ] End-to-end test: ask agent to summarise my last 5 emails
+
+## Important Notes
+
+- **Ask me before running anything that costs money or modifies production resources**
+- **Show me commands before executing them** — I want to understand what's happening
+- **If something fails, don't retry blindly** — show me the error and let's diagnose together
+- **Store all secrets temporarily in a local .env file**, then we'll move them to Azure Key Vault
+- **My Anthropic API key** — I'll provide this when we get to OpenClaw config, don't ask for it upfront
