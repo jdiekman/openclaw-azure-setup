@@ -133,14 +133,6 @@ Status: code written, Azure resources not yet provisioned. See `meeting-service/
 | Anthropic API (Claude Sonnet) | Usage-based |
 | ACS + Speech (if meeting service enabled) | ~$1/hr STT + $0.004/min calling |
 
-## Pending Work
-
-- [ ] Move secrets to Azure Key Vault
-- [ ] Block Control UI from public access via Caddy
-- [ ] Phase 10: GitHub SSH keys, template repos, OIDC federation
-- [ ] Reapply msteams plugin patches after any plugin update
-- [ ] Review client secret expiry and rotate before it expires
-
 ## License
 
 This repo contains deployment documentation and configuration templates. No application source code is included. Use at your own risk.
